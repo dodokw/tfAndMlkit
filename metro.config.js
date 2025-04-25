@@ -1,4 +1,5 @@
-const { getDefaultConfig, mergeConfig } = require('@react-native/metro-config')
+const { getDefaultConfig } = require('@expo/metro-config')
+const { mergeConfig } = require('@react-native/metro-config')
 const path = require('path')
 const escape = require('escape-string-regexp')
 const exclusionList = require('metro-config/src/defaults/exclusionList')
@@ -27,7 +28,7 @@ const config = {
       acc[name] = path.join(__dirname, 'node_modules', name)
       return acc
     }, {}),
-    assetExts: assetExts.filter((ext) => ext !== 'svg'),
+    assetExts: [...assetExts.filter((ext) => ext !== 'svg'), 'bin', 'tflite'], // Add 'bin' and 'tflite' to assetExts
     sourceExts: [...sourceExts, 'svg'],
   },
 

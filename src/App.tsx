@@ -1,259 +1,407 @@
-// App.js
-import React, { useState, useRef, useEffect } from 'react'
-import { View, Text, TouchableOpacity, StyleSheet, Alert, ActivityIndicator } from 'react-native'
-import { Camera, useCameraDevices } from 'react-native-vision-camera'
-import { useFaceDetector } from 'react-native-vision-camera-face-detector'
+import React, { useEffect, useRef, useState } from 'react'
+import { StyleSheet, View, Text, TouchableOpacity, Dimensions, Modal, TextInput, Alert } from 'react-native'
+import { useCameraDevice, useCameraPermission, useFrameProcessor } from 'react-native-vision-camera'
+import { Camera, FaceDetectionOptions } from 'react-native-vision-camera-face-detector'
+import { runOnJS } from 'react-native-reanimated'
+import { loadTensorflowModel } from 'react-native-fast-tflite'
 import AsyncStorage from '@react-native-async-storage/async-storage'
-import * as tf from '@tensorflow/tfjs'
-import { bundleResourceIO, decodeJpeg } from '@tensorflow/tfjs-react-native'
-import { Asset } from 'expo-asset'
 
-// GhostFaceNets 모델 경로 (가정: 앱 내에 포함된 모델 파일).
-const MODEL_JSON = require('./assets/model/model.json')
-const MODEL_WEIGHTS = require('./assets/model/weights.bin')
+const { width, height } = Dimensions.get('window')
 
-// 임베딩 유사도 비교 함수
-const cosineSimilarity = (vecA, vecB) => {
-  let dotProduct = 0
-  let normA = 0
-  let normB = 0
-
-  for (let i = 0; i < vecA.length; i++) {
-    dotProduct += vecA[i] * vecB[i]
-    normA += vecA[i] * vecA[i]
-    normB += vecB[i] * vecB[i]
-  }
-
-  normA = Math.sqrt(normA)
-  normB = Math.sqrt(normB)
-
-  if (normA === 0 || normB === 0) {
-    return 0
-  }
-
-  return dotProduct / (normA * normB)
-}
-
-// 이미지 전처리 함수
-const preprocessImage = async (image) => {
-  // 이미지를 텐서로 변환
-  const imageAsset = Asset.fromURI(image.uri)
-  await imageAsset.downloadAsync()
-
-  const imageBuffer = await require('fs').readFileSync(imageAsset.localUri)
-  const imageTensor = decodeJpeg(imageBuffer)
-
-  // 크기 조정 (GhostFaceNets 입력 크기에 맞게)
-  const resized = tf.image.resizeBilinear(imageTensor, [112, 112])
-
-  // 정규화 (0~1 범위로)
-  const normalized = resized.div(255.0)
-
-  // 배치 차원 추가
-  const batched = normalized.expandDims(0)
-
-  return batched
-}
-
-const App = () => {
-  const [hasPermission, setHasPermission] = useState(null)
-  const [registrationMode, setRegistrationMode] = useState(false)
-  const [recognitionActive, setRecognitionActive] = useState(false)
-  const [userName, setUserName] = useState('홍길동') // 기본 사용자 이름
-  const [modelLoaded, setModelLoaded] = useState(false)
-  const [registeredUsers, setRegisteredUsers] = useState([])
-  const [matchResult, setMatchResult] = useState(null)
-
+const FaceRecognition = () => {
+  const { hasPermission, requestPermission } = useCameraPermission()
   const camera = useRef(null)
-  const devices = useCameraDevices()
-  const device = devices.front
-  const ghostFaceNetModel = useRef(null)
+  const device = useCameraDevice('front')
 
-  // 얼굴 인식 프레임워크 초기화
-  const { faceDetector, detectFaces } = useFaceDetector()
+  const [faceData, setFaceData] = useState(null)
+  const [recognizedPerson, setRecognizedPerson] = useState('Unknown')
+  const [isProcessingFrame, setIsProcessingFrame] = useState(false)
+  const [isRecording, setIsRecording] = useState(false)
+  const [capturedFace, setCapturedFace] = useState(null)
+  const [savedFaces, setSavedFaces] = useState([])
+  const [modalVisible, setModalVisible] = useState(false)
+  const [newPersonName, setNewPersonName] = useState('')
+  const [model, setModel] = useState(null)
 
-  // 카메라 권한 요청 및 모델 로드
+  // Face detection options
+  const faceDetectionOptions = useRef<FaceDetectionOptions>({
+    // detection options
+  }).current
+
+  // Load TensorFlow model and saved faces on component mount
   useEffect(() => {
-    ;(async () => {
-      const cameraPermission = await Camera.requestCameraPermission()
-      setHasPermission(cameraPermission === 'authorized')
-
-      // 텐서플로우 초기화
-      await tf.ready()
-
-      // 모델 로드
+    const initialize = async () => {
       try {
-        const model = await tf.loadLayersModel(bundleResourceIO(MODEL_JSON, MODEL_WEIGHTS))
-        ghostFaceNetModel.current = model
-        setModelLoaded(true)
-        console.log('GhostFaceNets 모델 로드 완료')
-      } catch (error) {
-        console.error('모델 로드 실패:', error)
-      }
+        // Load TensorFlow model
+        const loadedModel = await loadTensorflowModel(require('./assets/model/mobile_face_net.tflite'))
+        setModel(loadedModel)
+        console.log('TensorFlow model loaded successfully')
 
-      // 저장된 사용자 목록 불러오기
-      loadRegisteredUsers()
-    })()
+        // Load saved faces from AsyncStorage
+        const loadedFaces = await loadSavedFaces()
+        if (loadedFaces) {
+          setSavedFaces(loadedFaces)
+          console.log(`Loaded ${loadedFaces.length} faces from storage`)
+        }
+      } catch (error) {
+        console.error('Failed to initialize:', error)
+        Alert.alert('Initialization Error', 'Failed to load face recognition model.')
+      }
+    }
+
+    initialize()
+
+    return () => {
+      // Cleanup
+      if (model) {
+        // Close model if needed
+        console.log('Cleaning up resources')
+      }
+    }
   }, [])
 
-  // 등록된 사용자 목록 로드
-  const loadRegisteredUsers = async () => {
+  // Check and request camera permission
+  useEffect(() => {
+    if (!hasPermission) {
+      requestPermission()
+    }
+  }, [hasPermission, requestPermission])
+
+  // Load saved faces from AsyncStorage
+  const loadSavedFaces = async () => {
     try {
-      const users = await AsyncStorage.getItem('registeredUsers')
-      if (users) {
-        setRegisteredUsers(JSON.parse(users))
-      }
+      const jsonValue = await AsyncStorage.getItem('savedFaces')
+      return jsonValue != null ? JSON.parse(jsonValue) : []
     } catch (error) {
-      console.error('사용자 목록 로드 실패:', error)
+      console.error('Error loading saved faces:', error)
+      return []
     }
   }
 
-  // 얼굴 특징 추출 함수
-  const extractFaceEmbedding = async (face) => {
-    if (!ghostFaceNetModel.current) return null
+  // Save faces to AsyncStorage
+  const saveFacesToStorage = async (faces) => {
+    try {
+      const jsonValue = JSON.stringify(faces)
+      await AsyncStorage.setItem('savedFaces', jsonValue)
+    } catch (error) {
+      console.error('Error saving faces:', error)
+      Alert.alert('Storage Error', 'Failed to save face data.')
+    }
+  }
+
+  // Helper function to extract face embeddings using TensorFlow model
+  const extractFaceEmbedding = async (faceImage) => {
+    console.log('work????:::???')
+    if (!model) return null
 
     try {
-      // 얼굴 영역 추출 및 전처리
-      const processedFace = await preprocessImage(face)
+      // Process image with TensorFlow model to get face embeddings using runForMultipleInputsOutputs
+      // Similar to how it's used in the Java source
+      const inputs = {
+        input_1: faceImage,
+      }
 
-      // 임베딩 추출
-      const embedding = ghostFaceNetModel.current.predict(processedFace)
-      const embeddingData = await embedding.data()
+      const outputs = {
+        output_1: { dtype: 'float32', shape: [1, 192] }, // Assuming output shape, adjust as needed
+      }
 
-      // 텐서 정리
-      tf.dispose([processedFace, embedding])
-
-      return Array.from(embeddingData)
+      // const result = await model.runForMultipleInputsOutputs([inputs], [outputs])
+      // return result[0] // Adjust based on actual output structure
+      console.log('process face embedding.......')
+      const result = await model.run([inputs])
+      console.log('result', result)
     } catch (error) {
-      console.error('얼굴 특징 추출 실패:', error)
+      console.error('Error extracting face embedding:', error)
       return null
     }
   }
 
-  // 얼굴 등록 함수
-  const registerFace = async () => {
-    if (!camera.current) return
+  // Calculate similarity between face embeddings (cosine similarity)
+  const calculateSimilarity = (embedding1, embedding2) => {
+    // Cosine similarity implementation
+    let dotProduct = 0
+    let norm1 = 0
+    let norm2 = 0
 
-    try {
-      // 사진 촬영
-      const photo = await camera.current.takePhoto({
-        flash: 'off',
-        qualityPrioritization: 'speed',
-      })
+    for (let i = 0; i < embedding1.length; i++) {
+      dotProduct += embedding1[i] * embedding2[i]
+      norm1 += embedding1[i] * embedding1[i]
+      norm2 += embedding2[i] * embedding2[i]
+    }
 
-      // 얼굴 감지
-      const faces = await detectFaces(photo.path)
+    return dotProduct / (Math.sqrt(norm1) * Math.sqrt(norm2))
+  }
 
-      if (faces.length === 0) {
-        Alert.alert('오류', '얼굴이 감지되지 않았습니다. 다시 시도해주세요.')
-        return
+  // Find the closest match for a face embedding
+  const findMatch = (embedding) => {
+    if (savedFaces.length === 0) return null
+
+    let maxSimilarity = -1
+    let bestMatch = null
+
+    for (const face of savedFaces) {
+      const similarity = calculateSimilarity(embedding, face.embedding)
+      if (similarity > maxSimilarity && similarity > 0.8) {
+        // Threshold for similarity
+        maxSimilarity = similarity
+        bestMatch = face
       }
+    }
 
-      if (faces.length > 1) {
-        Alert.alert('오류', '여러 얼굴이 감지되었습니다. 한 명만 포함되도록 다시 시도해주세요.')
-        return
-      }
+    return bestMatch
+  }
 
-      // 임베딩 추출
-      const embedding = await extractFaceEmbedding({ uri: `file://${photo.path}` })
-      if (!embedding) {
-        Alert.alert('오류', '얼굴 특징 추출에 실패했습니다.')
-        return
-      }
+  // Prepare image for model input
+  const prepareImageForModel = (imageData, faceBounds) => {
+    // This is a placeholder for the actual implementation
+    // In reality, this would crop the face from the frame, resize to the expected input size,
+    // normalize pixel values, etc. based on what the model expects
 
-      // 사용자 정보 저장
-      const userData = { name: userName, embedding }
-      const updatedUsers = [...registeredUsers, userData]
+    // Example preprocessing (pseudocode):
+    // 1. Crop the face region using faceBounds
+    // 2. Resize to model input size (e.g., 112x112)
+    // 3. Convert to float32 and normalize pixel values
 
-      await AsyncStorage.setItem(userName, JSON.stringify(embedding))
-      await AsyncStorage.setItem('registeredUsers', JSON.stringify(updatedUsers))
-
-      setRegisteredUsers(updatedUsers)
-      Alert.alert('성공', `${userName}님의 얼굴이 등록되었습니다.`)
-      setRegistrationMode(false)
-    } catch (error) {
-      console.error('얼굴 등록 실패:', error)
-      Alert.alert('오류', '얼굴 등록 중 오류가 발생했습니다.')
+    return {
+      // Preprocessed image data
+      width: 112, // Example expected model input size
+      height: 112,
+      data: new Float32Array(112 * 112 * 3), // Placeholder for actual pixel data
+      // Additional metadata needed by the model
     }
   }
 
-  // 실시간 얼굴 인식 처리 함수
-  const handleFaces = async (faceData) => {
-    if (!recognitionActive || registeredUsers.length === 0) return
+  // Process detected faces
+  const processDetectedFace = async (face, imageData) => {
+    console.log('processDetectedFace222222222222')
+    if (!isProcessingFrame && model) {
+      setIsProcessingFrame(true)
 
-    try {
-      if (faceData.faces.length === 0) {
-        setMatchResult(null)
+      try {
+        // Extract face region from the frame and prepare for model input
+        const preparedFaceImage = prepareImageForModel(imageData, face.bounds)
+
+        // Get face embedding
+        const embedding = await extractFaceEmbedding(preparedFaceImage)
         return
-      }
+        if (embedding) {
+          // Try to recognize the face
+          const match = findMatch(embedding)
 
-      const face = faceData.faces[0]
-
-      // 간단한 최적화: 얼굴이 너무 작으면 처리하지 않음
-      if (face.bounds.width < 100 || face.bounds.height < 100) {
-        return
-      }
-
-      // 임베딩 추출 (여기서는 실제 구현에서는 더 최적화 필요)
-      const photo = await camera.current.takePhoto({
-        flash: 'off',
-        qualityPrioritization: 'speed',
-      })
-
-      const currentEmbedding = await extractFaceEmbedding({ uri: `file://${photo.path}` })
-      if (!currentEmbedding) return
-
-      // 모든 등록된 사용자와 비교
-      let bestMatch = { name: null, similarity: 0 }
-
-      for (const user of registeredUsers) {
-        const similarity = cosineSimilarity(currentEmbedding, user.embedding)
-
-        if (similarity > bestMatch.similarity) {
-          bestMatch = { name: user.name, similarity }
+          if (match) {
+            setRecognizedPerson(match.name)
+          } else {
+            setRecognizedPerson('Unknown')
+          }
         }
+      } catch (error) {
+        console.error('Error processing face:', error)
       }
 
-      // 0.7 이상일 경우 매칭 성공으로 간주
-      if (bestMatch.similarity >= 0.7) {
-        setMatchResult({
-          name: bestMatch.name,
-          similarity: bestMatch.similarity,
-          success: true,
-        })
-      } else {
-        setMatchResult({
-          name: '알 수 없음',
-          similarity: bestMatch.similarity,
-          success: false,
-        })
-      }
-    } catch (error) {
-      console.error('얼굴 인식 중 오류:', error)
+      setIsProcessingFrame(false)
     }
   }
 
-  if (hasPermission === null) {
-    return (
-      <View style={styles.container}>
-        <Text>카메라 권한 요청 중...</Text>
-      </View>
-    )
+  // Handle face detection callback
+  const handleFacesDetection = (faces, frame) => {
+    // console.log('face', faces[0])
+    // if (faces && faces.length > 0) {
+    if (faces[0]) {
+      // Get the largest face (assume it's the main subject)
+      // console.log('facedetected')
+
+      // console.log('faces', faces)
+      // console.log(typeof faces)
+      // const faceArray = Object.values(faces)
+      // console.log('faceArray:::::', faceArray)
+
+      // console.log('faces:', faces)
+      // console.log('typeof faces:', typeof faces)
+
+      // for (const key in faces) {
+      //   console.log('key:', key, 'value:', faces[key])
+      // }
+
+      // console.log('Object.keys:', Object.keys(faces))
+      // console.log('Object.getOwnPropertyNames:', Object.getOwnPropertyNames(faces))
+      // console.log('Object.values:', Object.values(faces))
+
+      // const descriptor = Object.getOwnPropertyDescriptor(faces, '0')
+      // console.log('Property descriptor for "0":', descriptor)
+      // console.log('Is faces a Proxy?', faces instanceof Proxy)
+      const pureFaces = JSON.parse(JSON.stringify(faces))
+      // console.log('pureFaces:', pureFaces)
+      // console.log('Object.values(pureFaces):', Object.values(pureFaces))
+      const newFaces = Object.values(pureFaces)
+
+      const largestFace = newFaces.reduce((prev, current) => {
+        const prevArea = prev.bounds.width * prev.bounds.height
+        const currentArea = current.bounds.width * current.bounds.height
+        return prevArea > currentArea ? prev : current
+      })
+      // console.log('setFaceData....:::', largestFace)
+      setFaceData(largestFace)
+
+      // If we're in recording mode, process the face
+      if (isRecording) {
+        console.log('processDetectedFace')
+        processDetectedFace(largestFace, frame)
+      }
+    } else {
+      setFaceData(null)
+      if (isRecording) {
+        setRecognizedPerson('No face detected')
+      }
+    }
   }
 
-  if (hasPermission === false) {
-    return (
-      <View style={styles.container}>
-        <Text>카메라 접근 권한이 없습니다.</Text>
-      </View>
-    )
+  // Capture face for enrolling a new person
+  const captureFace = async () => {
+    if (!camera.current || !faceData) {
+      Alert.alert('Capture Error', 'No face detected or camera not ready.')
+      return
+    }
+
+    try {
+      // Take a photo
+      console.log('takephoto!!!')
+      const photo = await camera.current.takePhoto({
+        flash: 'off',
+        quality: 90,
+      })
+
+      // Process the photo to extract just the face region
+      setCapturedFace({
+        path: photo.path,
+        bounds: faceData.bounds,
+      })
+
+      // Show modal to enter person's name
+      setModalVisible(true)
+    } catch (error) {
+      console.error('Error capturing face:', error)
+      Alert.alert('Capture Error', 'Failed to capture face. Please try again.')
+    }
   }
 
-  if (!device || !modelLoaded) {
+  // Prepare captured face for model
+  const prepareCapturedFace = async (facePath, faceBounds) => {
+    // This is a placeholder for the actual implementation
+    // In reality, this would load the image from disk, crop the face,
+    // resize, normalize, etc.
+
+    return {
+      // Preprocessed image data
+      width: 112, // Example expected model input size
+      height: 112,
+      data: new Float32Array(112 * 112 * 3), // Placeholder for actual pixel data
+    }
+  }
+
+  // Add new person with captured face
+  const addNewPerson = async () => {
+    if (!capturedFace || !newPersonName.trim() || !model) {
+      Alert.alert('Input Error', 'Please provide a name and ensure a face is captured.')
+      return
+    }
+
+    try {
+      // Prepare the captured face for the model
+      const preparedFace = await prepareCapturedFace(capturedFace.path, capturedFace.bounds)
+
+      // Extract face embedding
+      const embedding = await extractFaceEmbedding(preparedFace)
+
+      if (embedding) {
+        // Create new person entry
+        const newPerson = {
+          id: Date.now().toString(),
+          name: newPersonName.trim(),
+          embedding: embedding,
+          imagePath: capturedFace.path,
+        }
+
+        // Add to saved faces
+        const updatedFaces = [...savedFaces, newPerson]
+        setSavedFaces(updatedFaces)
+
+        // Save to storage
+        await saveFacesToStorage(updatedFaces)
+
+        // Reset state
+        setNewPersonName('')
+        setCapturedFace(null)
+        setModalVisible(false)
+
+        Alert.alert('Success', `Added ${newPersonName} successfully!`)
+      } else {
+        Alert.alert('Processing Error', 'Could not process face features. Please try again.')
+      }
+    } catch (error) {
+      console.error('Error adding new person:', error)
+      Alert.alert('Error', 'Failed to add new person. Please try again.')
+    }
+  }
+
+  // Toggle face recognition mode
+  const toggleRecognition = () => {
+    setIsRecording(!isRecording)
+    if (!isRecording) {
+      setRecognizedPerson('Scanning...')
+    } else {
+      setRecognizedPerson('Recognition stopped')
+    }
+  }
+
+  // Render face overlay box
+  const renderFaceBox = () => {
+    if (!faceData) return null
+
+    const { bounds } = faceData
+    const boxStyle = {
+      position: 'absolute',
+      borderWidth: 2,
+      borderColor: isRecording ? '#00FF00' : '#FFFFFF',
+      left: bounds.x,
+      top: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+    }
+
+    return <View style={boxStyle} />
+  }
+
+  // Clear all saved faces
+  const clearAllFaces = async () => {
+    Alert.alert('Clear All Faces', 'Are you sure you want to delete all saved faces?', [
+      {
+        text: 'Cancel',
+        style: 'cancel',
+      },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await AsyncStorage.removeItem('savedFaces')
+            setSavedFaces([])
+            Alert.alert('Success', 'All faces have been deleted.')
+          } catch (error) {
+            console.error('Error clearing faces:', error)
+            Alert.alert('Error', 'Failed to clear saved faces.')
+          }
+        },
+      },
+    ])
+  }
+
+  if (!hasPermission) {
     return (
-      <View style={styles.container}>
-        <ActivityIndicator size="large" color="#0000ff" />
-        <Text style={styles.loadingText}>{!device ? '카메라 초기화 중...' : '얼굴 인식 모델 로딩 중...'}</Text>
+      <View style={styles.centeredContainer}>
+        <Text style={styles.text}>Camera permission is required</Text>
+        <TouchableOpacity style={styles.button} onPress={requestPermission}>
+          <Text style={styles.buttonText}>Grant Permission</Text>
+        </TouchableOpacity>
       </View>
     )
   }
@@ -263,46 +411,76 @@ const App = () => {
       <Camera
         ref={camera}
         style={styles.camera}
-        device={device}
         isActive={true}
-        preset="low" // 480p 해상도 사용
-        fps={15} // 프레임율 조정
+        device={device}
+        faceDetectionCallback={handleFacesDetection}
+        faceDetectionOptions={faceDetectionOptions}
         photo={true}
-        faceDetectionMode="fast"
-        faceDetectorSettings={{
-          minFaceSize: 0.1,
-          performanceMode: 'fast',
-        }}
-        onFacesDetected={handleFaces}
       />
 
-      <View style={styles.controlsContainer}>
-        {registrationMode ? (
-          <TouchableOpacity style={styles.button} onPress={registerFace}>
-            <Text style={styles.buttonText}>얼굴 등록하기</Text>
-          </TouchableOpacity>
-        ) : (
-          <>
-            <TouchableOpacity
-              style={[styles.button, { backgroundColor: recognitionActive ? '#ff6666' : '#4CAF50' }]}
-              onPress={() => setRecognitionActive(!recognitionActive)}>
-              <Text style={styles.buttonText}>{recognitionActive ? '인식 중지' : '얼굴 인식 시작'}</Text>
-            </TouchableOpacity>
+      {/* Face overlay */}
+      <View style={styles.overlay}>
+        {renderFaceBox()}
 
-            <TouchableOpacity style={styles.button} onPress={() => setRegistrationMode(true)}>
-              <Text style={styles.buttonText}>등록 모드</Text>
+        {/* Recognition status */}
+        <View style={styles.recognitionStatus}>
+          <Text style={styles.recognitionText}>{isRecording ? `Recognized: ${recognizedPerson}` : 'Recognition Inactive'}</Text>
+        </View>
+
+        {/* Control buttons */}
+        <View style={styles.controls}>
+          <TouchableOpacity style={[styles.button, isRecording ? styles.activeButton : null]} onPress={toggleRecognition}>
+            <Text style={styles.buttonText}>{isRecording ? 'Stop Recognition' : 'Start Recognition'}</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.button, isRecording ? styles.disabledButton : null]}
+            onPress={captureFace}
+            disabled={isRecording || !faceData}>
+            <Text style={styles.buttonText}>Add Face</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Saved faces count and clear button */}
+        <View style={styles.savedFacesContainer}>
+          <View style={styles.savedFacesInfo}>
+            <Text style={styles.text}>Saved Faces: {savedFaces.length}</Text>
+          </View>
+
+          {savedFaces.length > 0 && (
+            <TouchableOpacity style={styles.clearButton} onPress={clearAllFaces}>
+              <Text style={styles.buttonText}>Clear All</Text>
             </TouchableOpacity>
-          </>
-        )}
+          )}
+        </View>
       </View>
 
-      {matchResult && recognitionActive && (
-        <View
-          style={[styles.resultContainer, { backgroundColor: matchResult.success ? 'rgba(76, 175, 80, 0.8)' : 'rgba(244, 67, 54, 0.8)' }]}>
-          <Text style={styles.resultText}>{matchResult.success ? `${matchResult.name}님 환영합니다!` : '일치하는 사용자가 없습니다'}</Text>
-          <Text style={styles.similarityText}>유사도: {(matchResult.similarity * 100).toFixed(1)}%</Text>
+      {/* Add Person Modal */}
+      <Modal animationType="slide" transparent={true} visible={modalVisible} onRequestClose={() => setModalVisible(false)}>
+        <View style={styles.modalContainer}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Add New Person</Text>
+
+            <TextInput style={styles.input} placeholder="Enter Person's Name" value={newPersonName} onChangeText={setNewPersonName} />
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={[styles.button, styles.cancelButton]}
+                onPress={() => {
+                  setModalVisible(false)
+                  setCapturedFace(null)
+                  setNewPersonName('')
+                }}>
+                <Text style={styles.buttonText}>Cancel</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={[styles.button, styles.saveButton]} onPress={addNewPerson}>
+                <Text style={styles.buttonText}>Save</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
         </View>
-      )}
+      </Modal>
     </View>
   )
 }
@@ -310,56 +488,136 @@ const App = () => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: 'red',
+  },
+  centeredContainer: {
+    flex: 1,
     justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#1a1a1a',
   },
   camera: {
-    flex: 1,
+    width: '100%',
+    height: '100%',
   },
-  controlsContainer: {
+  overlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  recognitionStatus: {
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    padding: 10,
+    margin: 20,
+    borderRadius: 10,
+    position: 'absolute',
+    top: 40,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+  },
+  recognitionText: {
+    color: 'white',
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+  controls: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
     position: 'absolute',
     bottom: 30,
     left: 0,
     right: 0,
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    paddingHorizontal: 20,
   },
   button: {
-    backgroundColor: '#4CAF50',
-    paddingVertical: 12,
-    paddingHorizontal: 30,
+    backgroundColor: '#4a90e2',
+    padding: 15,
     borderRadius: 8,
-    elevation: 3,
+    minWidth: 150,
+    alignItems: 'center',
+  },
+  activeButton: {
+    backgroundColor: '#e74c3c',
+  },
+  disabledButton: {
+    backgroundColor: '#95a5a6',
+    opacity: 0.7,
   },
   buttonText: {
     color: 'white',
     fontSize: 16,
     fontWeight: 'bold',
-    textAlign: 'center',
   },
-  resultContainer: {
+  savedFacesContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    padding: 8,
+    borderRadius: 8,
     position: 'absolute',
-    top: 50,
+    bottom: 100,
     left: 20,
     right: 20,
-    padding: 15,
-    borderRadius: 8,
+  },
+  savedFacesInfo: {
+    flex: 1,
+  },
+  clearButton: {
+    backgroundColor: '#e74c3c',
+    padding: 8,
+    borderRadius: 5,
+    marginLeft: 10,
+  },
+  text: {
+    color: 'white',
+    fontSize: 16,
+  },
+  modalContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+  },
+  modalContent: {
+    backgroundColor: 'white',
+    borderRadius: 10,
+    padding: 20,
+    width: '80%',
     alignItems: 'center',
   },
-  resultText: {
-    color: 'white',
+  modalTitle: {
     fontSize: 20,
     fontWeight: 'bold',
+    marginBottom: 20,
   },
-  similarityText: {
-    color: 'white',
-    fontSize: 16,
-    marginTop: 5,
+  input: {
+    width: '100%',
+    borderWidth: 1,
+    borderColor: '#ccc',
+    borderRadius: 5,
+    padding: 10,
+    marginBottom: 20,
   },
-  loadingText: {
-    marginTop: 10,
-    fontSize: 16,
+  modalButtons: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    width: '100%',
+  },
+  cancelButton: {
+    backgroundColor: '#95a5a6',
+  },
+  saveButton: {
+    backgroundColor: '#2ecc71',
   },
 })
 
-export default App
+export function App(): JSX.Element {
+  return (
+    <View style={{ flex: 1 }}>
+      <FaceRecognition />
+    </View>
+  )
+}

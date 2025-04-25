@@ -7,6 +7,7 @@ import {
   Camera as VisionCamera,
   useCameraDevice,
   useCameraPermission,
+  useTensorflowModel,
 } from 'react-native-vision-camera'
 import { useIsFocused } from '@react-navigation/core'
 // import { useAppState } from '@react-native-community/hooks';
@@ -23,6 +24,11 @@ import Animated, { useAnimatedStyle, useSharedValue, withTiming } from 'react-na
  */
 const FaceDetection = (): JSX.Element => {
   const { width, height } = useWindowDimensions()
+  //useTensorflowModel example
+  const { loadModel, unloadModel } = useTensorflowModel({
+    model: 'face_landmark.tflite',
+    type: 'tensorflowLite',
+  })
   const { hasPermission, requestPermission } = useCameraPermission()
   const [cameraMounted, setCameraMounted] = useState<boolean>(false)
   const [cameraPaused, setCameraPaused] = useState<boolean>(false)
