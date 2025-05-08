@@ -1,469 +1,623 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { StyleSheet, Text, Button, View, useWindowDimensions } from 'react-native'
-import {
-  CameraPosition,
-  DrawableFrame,
-  Frame,
-  Camera as VisionCamera,
-  useCameraDevice,
-  useCameraPermission,
-  useTensorflowModel,
-} from 'react-native-vision-camera'
-import { useIsFocused } from '@react-navigation/core'
-// import { useAppState } from '@react-native-community/hooks';
-import { SafeAreaProvider } from 'react-native-safe-area-context'
-import { NavigationContainer } from '@react-navigation/native'
-import { Camera, Face, FaceDetectionOptions, Contours, Landmarks } from 'react-native-vision-camera-face-detector'
-import { ClipOp, Skia, TileMode } from '@shopify/react-native-skia'
-import Animated, { useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated'
+import { StyleSheet, View, Text, TouchableOpacity, Dimensions, Modal, TextInput, Alert } from 'react-native'
+import { useCameraDevice, useCameraPermission, useFrameProcessor } from 'react-native-vision-camera'
+import { Camera, FaceDetectionOptions } from 'react-native-vision-camera-face-detector'
+import { runOnJS } from 'react-native-reanimated'
+import { loadTensorflowModel } from 'react-native-fast-tflite'
+import AsyncStorage from '@react-native-async-storage/async-storage'
 
-/**
- * Face detection component
- *
- * @return {JSX.Element} Component
- */
-const FaceDetection = (): JSX.Element => {
-  const { width, height } = useWindowDimensions()
-  //useTensorflowModel example
-  const { loadModel, unloadModel } = useTensorflowModel({
-    model: 'face_landmark.tflite',
-    type: 'tensorflowLite',
-  })
+const { width, height } = Dimensions.get('window')
+
+const FaceRecognition = () => {
   const { hasPermission, requestPermission } = useCameraPermission()
-  const [cameraMounted, setCameraMounted] = useState<boolean>(false)
-  const [cameraPaused, setCameraPaused] = useState<boolean>(false)
-  const [autoMode, setAutoMode] = useState<boolean>(true)
-  const [cameraFacing, setCameraFacing] = useState<CameraPosition>('front')
+  const camera = useRef(null)
+  const device = useCameraDevice('front')
+
+  const [faceData, setFaceData] = useState(null)
+  const [recognizedPerson, setRecognizedPerson] = useState('Unknown')
+  const [isProcessingFrame, setIsProcessingFrame] = useState(false)
+  const [isRecording, setIsRecording] = useState(false)
+  const [capturedFace, setCapturedFace] = useState(null)
+  const [savedFaces, setSavedFaces] = useState([])
+  const [modalVisible, setModalVisible] = useState(false)
+  const [newPersonName, setNewPersonName] = useState('')
+  const [model, setModel] = useState(null)
+
+  // Face detection options
   const faceDetectionOptions = useRef<FaceDetectionOptions>({
-    performanceMode: 'fast',
-    classificationMode: 'all',
-    contourMode: 'all',
-    landmarkMode: 'all',
-    windowWidth: width,
-    windowHeight: height,
+    // detection options
   }).current
-  const isFocused = useIsFocused()
-  // const appState = useAppState();
-  const isCameraActive = !cameraPaused && isFocused
-  // appState === 'active'
-  const cameraDevice = useCameraDevice(cameraFacing)
-  //
-  // vision camera ref
-  //
-  const camera = useRef<VisionCamera>(null)
-  //
-  // face rectangle position
-  //
-  const aFaceW = useSharedValue(0)
-  const aFaceH = useSharedValue(0)
-  const aFaceX = useSharedValue(0)
-  const aFaceY = useSharedValue(0)
-  const aRot = useSharedValue(0)
 
-  // 각 포인트의 위치를 저장할 16개의 SharedValue 배열 생성
-  const eyePointsX = Array(16)
-    .fill(0)
-    .map(() => useSharedValue(0))
-  const eyePointsY = Array(16)
-    .fill(0)
-    .map(() => useSharedValue(0))
-  const eyePointsX2 = Array(16)
-    .fill(0)
-    .map(() => useSharedValue(0))
-  const eyePointsY2 = Array(16)
-    .fill(0)
-    .map(() => useSharedValue(0))
-
-  const boundingBoxStyle = useAnimatedStyle(() => ({
-    position: 'absolute',
-    borderWidth: 4,
-    borderLeftColor: 'rgb(0,255,0)',
-    borderRightColor: 'rgb(0,255,0)',
-    borderBottomColor: 'rgb(0,255,0)',
-    borderTopColor: 'rgb(255,0,0)',
-    width: withTiming(aFaceW.value, {
-      duration: 100,
-    }),
-    height: withTiming(aFaceH.value, {
-      duration: 100,
-    }),
-    left: withTiming(aFaceX.value, {
-      duration: 100,
-    }),
-    top: withTiming(aFaceY.value, {
-      duration: 100,
-    }),
-    transform: [
-      {
-        rotate: `${aRot.value}deg`,
-      },
-    ],
-  }))
-
+  // Load TensorFlow model and saved faces on component mount
   useEffect(() => {
-    if (hasPermission) return
-    requestPermission()
+    const initialize = async () => {
+      try {
+        // Load TensorFlow model
+        const loadedModel = await loadTensorflowModel(require('./assets/model/facenet.tflite'))
+        setModel(loadedModel)
+        console.log('TensorFlow model loaded successfully')
+
+        // Load saved faces from AsyncStorage
+        const loadedFaces = await loadSavedFaces()
+        if (loadedFaces) {
+          setSavedFaces(loadedFaces)
+          console.log(`Loaded ${loadedFaces.length} faces from storage`)
+        }
+      } catch (error) {
+        console.error('Failed to initialize:', error)
+        Alert.alert('Initialization Error', 'Failed to load face recognition model.')
+      }
+    }
+
+    initialize()
+
+    return () => {
+      // Cleanup
+      if (model) {
+        // Close model if needed
+        console.log('Cleaning up resources')
+      }
+    }
+  }, [])
+
+  // Check and request camera permission
+  useEffect(() => {
+    if (!hasPermission) {
+      requestPermission()
+    }
   }, [hasPermission, requestPermission])
 
-  // 각 포인트에 대한 애니메이션 스타일을 생성하는 함수
+  // Load saved faces from AsyncStorage
+  const loadSavedFaces = async () => {
+    try {
+      const jsonValue = await AsyncStorage.getItem('savedFaces')
+      return jsonValue != null ? JSON.parse(jsonValue) : []
+    } catch (error) {
+      console.error('Error loading saved faces:', error)
+      return []
+    }
+  }
 
-  const createEyePointStyle = (index) => {
-    return useAnimatedStyle(() => {
-      return {
-        position: 'absolute',
-        width: 8,
-        height: 8,
-        borderRadius: 4,
-        backgroundColor: index === 0 ? 'red' : index === 4 ? 'yellow' : 'cyan',
-        left: withTiming(eyePointsX[index].value - 4, { duration: 100 }),
-        top: withTiming(eyePointsY[index].value - 4, { duration: 100 }),
-        transform: [{ rotate: `${aRot.value}deg` }],
+  // Save faces to AsyncStorage
+  const saveFacesToStorage = async (faces) => {
+    try {
+      const jsonValue = JSON.stringify(faces)
+      await AsyncStorage.setItem('savedFaces', jsonValue)
+    } catch (error) {
+      console.error('Error saving faces:', error)
+      Alert.alert('Storage Error', 'Failed to save face data.')
+    }
+  }
+
+  // Helper function to extract face embeddings using TensorFlow model
+  const extractFaceEmbedding = async (faceImage) => {
+    console.log('work????:::???')
+    if (!model) return null
+
+    try {
+      // Process image with TensorFlow model to get face embeddings using runForMultipleInputsOutputs
+      // Similar to how it's used in the Java source
+      const inputs = {
+        input_1: faceImage,
       }
-    })
-  }
 
-  const createEyePointStyle2 = (index) => {
-    return useAnimatedStyle(() => {
-      return {
-        position: 'absolute',
-        width: 8,
-        height: 8,
-        borderRadius: 4,
-        backgroundColor: index === 0 ? 'red' : index === 4 ? 'yellow' : 'cyan',
-        left: withTiming(eyePointsX2[index].value - 4, { duration: 100 }),
-        top: withTiming(eyePointsY2[index].value - 4, { duration: 100 }),
-        transform: [{ rotate: `${aRot.value}deg` }],
+      const outputs = {
+        output_1: { dtype: 'float32', shape: [1, 192] }, // Assuming output shape, adjust as needed
       }
-    })
+
+      // const result = await model.runForMultipleInputsOutputs([inputs], [outputs])
+      // return result[0] // Adjust based on actual output structure
+      console.log('process face embedding.......')
+      const result = await model.run([inputs])
+      console.log('result', result)
+    } catch (error) {
+      console.error('Error extracting face embedding:', error)
+      return null
+    }
   }
 
-  // 각 포인트에 대한 스타일 배열 생성
-  const eyePointStyles = Array(16)
-    .fill(0)
-    .map((_, index) => createEyePointStyle(index))
+  // Calculate similarity between face embeddings (cosine similarity)
+  const calculateSimilarity = (embedding1, embedding2) => {
+    // Cosine similarity implementation
+    let dotProduct = 0
+    let norm1 = 0
+    let norm2 = 0
 
-  const eyePointStyles2 = Array(16)
-    .fill(0)
-    .map((_, index) => createEyePointStyle2(index))
-  // 렌더링 부분에 포인트 요소들 추가
+    for (let i = 0; i < embedding1.length; i++) {
+      dotProduct += embedding1[i] * embedding2[i]
+      norm1 += embedding1[i] * embedding1[i]
+      norm2 += embedding2[i] * embedding2[i]
+    }
 
-  /**
-   * Handle camera UI rotation
-   *
-   * @param {number} rotation Camera rotation
-   */
-  const handleUiRotation = (rotation: number) => {
-    aRot.value = rotation
+    return dotProduct / (Math.sqrt(norm1) * Math.sqrt(norm2))
   }
 
-  /**
-   * Hanldes camera mount error event
-   *
-   * @param {any} error Error event
-   */
-  const handleCameraMountError = (error: any) => {
-    console.error('camera mount error', error)
+  // Find the closest match for a face embedding
+  const findMatch = (embedding) => {
+    if (savedFaces.length === 0) return null
+
+    let maxSimilarity = -1
+    let bestMatch = null
+
+    for (const face of savedFaces) {
+      const similarity = calculateSimilarity(embedding, face.embedding)
+      if (similarity > maxSimilarity && similarity > 0.8) {
+        // Threshold for similarity
+        maxSimilarity = similarity
+        bestMatch = face
+      }
+    }
+
+    return bestMatch
   }
 
-  // handleFacesDetected 함수 수정
-  const handleFacesDetected = (faces: Face[], frame: Frame): void => {
-    // 얼굴이 감지되지 않은 경우
-    if (Object.keys(faces).length <= 0) {
-      aFaceW.value = 0
-      aFaceH.value = 0
-      aFaceX.value = 0
-      aFaceY.value = 0
+  // Prepare image for model input
+  const prepareImageForModel = (imageData, faceBounds) => {
+    // This is a placeholder for the actual implementation
+    // In reality, this would crop the face from the frame, resize to the expected input size,
+    // normalize pixel values, etc. based on what the model expects
+
+    // Example preprocessing (pseudocode):
+    // 1. Crop the face region using faceBounds
+    // 2. Resize to model input size (e.g., 112x112)
+    // 3. Convert to float32 and normalize pixel values
+
+    return {
+      // Preprocessed image data
+      width: 112, // Example expected model input size
+      height: 112,
+      data: new Float32Array(112 * 112 * 3), // Placeholder for actual pixel data
+      // Additional metadata needed by the model
+    }
+  }
+
+  // Process detected faces
+  const processDetectedFace = async (face, imageData) => {
+    console.log('processDetectedFace222222222222')
+    if (!isProcessingFrame && model) {
+      setIsProcessingFrame(true)
+
+      try {
+        // Extract face region from the frame and prepare for model input
+        const preparedFaceImage = prepareImageForModel(imageData, face.bounds)
+
+        // Get face embedding
+        const embedding = await extractFaceEmbedding(preparedFaceImage)
+        return
+        if (embedding) {
+          // Try to recognize the face
+          const match = findMatch(embedding)
+
+          if (match) {
+            setRecognizedPerson(match.name)
+          } else {
+            setRecognizedPerson('Unknown')
+          }
+        }
+      } catch (error) {
+        console.error('Error processing face:', error)
+      }
+
+      setIsProcessingFrame(false)
+    }
+  }
+
+  // Handle face detection callback
+  const handleFacesDetection = (faces, frame) => {
+    // console.log('face', faces[0])
+    // if (faces && faces.length > 0) {
+    if (faces[0]) {
+      // Get the largest face (assume it's the main subject)
+      // console.log('facedetected')
+
+      // console.log('faces', faces)
+      // console.log(typeof faces)
+      // const faceArray = Object.values(faces)
+      // console.log('faceArray:::::', faceArray)
+
+      // console.log('faces:', faces)
+      // console.log('typeof faces:', typeof faces)
+
+      // for (const key in faces) {
+      //   console.log('key:', key, 'value:', faces[key])
+      // }
+
+      // console.log('Object.keys:', Object.keys(faces))
+      // console.log('Object.getOwnPropertyNames:', Object.getOwnPropertyNames(faces))
+      // console.log('Object.values:', Object.values(faces))
+
+      // const descriptor = Object.getOwnPropertyDescriptor(faces, '0')
+      // console.log('Property descriptor for "0":', descriptor)
+      // console.log('Is faces a Proxy?', faces instanceof Proxy)
+      const pureFaces = JSON.parse(JSON.stringify(faces))
+      // console.log('pureFaces:', pureFaces)
+      // console.log('Object.values(pureFaces):', Object.values(pureFaces))
+      const newFaces = Object.values(pureFaces)
+
+      const largestFace = newFaces.reduce((prev, current) => {
+        const prevArea = prev.bounds.width * prev.bounds.height
+        const currentArea = current.bounds.width * current.bounds.height
+        return prevArea > currentArea ? prev : current
+      })
+      // console.log('setFaceData....:::', largestFace)
+      setFaceData(largestFace)
+
+      // If we're in recording mode, process the face
+      if (isRecording) {
+        console.log('processDetectedFace')
+        processDetectedFace(largestFace, frame)
+      }
+    } else {
+      setFaceData(null)
+      if (isRecording) {
+        setRecognizedPerson('No face detected')
+      }
+    }
+  }
+
+  // Capture face for enrolling a new person
+  const captureFace = async () => {
+    if (!camera.current || !faceData) {
+      Alert.alert('Capture Error', 'No face detected or camera not ready.')
       return
     }
 
-    console.log('faces', faces.length, 'frame', frame.toString())
-
-    const { bounds, contours } = faces[0]
-    console.log('bounds', bounds)
-
-    // 기존 얼굴 경계 업데이트
-    const { width, height, x, y } = bounds
-    aFaceW.value = width + 70
-    aFaceH.value = height + 50
-    aFaceX.value = x - 50
-    aFaceY.value = y - 25
-
-    // LEFT_EYE 각 포인트 위치 업데이트
-    if (contours?.LEFT_EYE) {
-      for (let i = 0; i < 16; i++) {
-        if (contours.LEFT_EYE[i]) {
-          eyePointsX[i].value = contours.LEFT_EYE[i].x
-          eyePointsY[i].value = contours.LEFT_EYE[i].y
-        }
-      }
-    }
-    // RIGHT_EYE 각 포인트 위치 업데이트
-    if (contours?.RIGHT_EYE) {
-      for (let i = 0; i < 16; i++) {
-        if (contours.RIGHT_EYE[i]) {
-          eyePointsX2[i].value = contours.RIGHT_EYE[i].x
-          eyePointsY2[i].value = contours.RIGHT_EYE[i].y
-        }
-      }
-    }
-
-    // only call camera methods if ref is defined
-    if (camera.current) {
-      // take photo, capture video, etc...
-    }
-  }
-
-  // 렌더링 부분에 포인트 요소들 추가
-  const renderEyePoints = () => {
-    return eyePointStyles.map((style, index) => <Animated.View key={`eye-point-${index}`} style={style} />)
-  }
-
-  const renderEyePoints2 = () => {
-    return eyePointStyles2.map((style, index) => <Animated.View key={`eye-point2-${index}`} style={style} />)
-  }
-
-  /**
-   * Handle skia frame actions
-   *
-   * @param {Face[]} faces Detection result
-   * @param {DrawableFrame} frame Current frame
-   * @returns {void}
-   */
-  const handleSkiaActions = (faces: Face[], frame: DrawableFrame): void => {
-    'worklet'
-    // if no faces are detected we do nothing
-    if (Object.keys(faces).length <= 0) return
-
-    console.log('SKIA - faces', faces.length, 'frame', frame.toString())
-
-    const { bounds, contours, landmarks } = faces[0]
-
-    // draw a blur shape around the face points
-    const blurRadius = 25
-    const blurFilter = Skia.ImageFilter.MakeBlur(blurRadius, blurRadius, TileMode.Repeat, null)
-    const blurPaint = Skia.Paint()
-    blurPaint.setImageFilter(blurFilter)
-    const contourPath = Skia.Path.Make()
-    const necessaryContours: (keyof Contours)[] = ['FACE', 'LEFT_CHEEK', 'RIGHT_CHEEK']
-
-    necessaryContours.forEach((key) => {
-      contours?.[key]?.forEach((point, index) => {
-        if (index === 0) {
-          // it's a starting point
-          contourPath.moveTo(point.x, point.y)
-        } else {
-          // it's a continuation
-          contourPath.lineTo(point.x, point.y)
-        }
+    try {
+      // Take a photo
+      console.log('takephoto!!!')
+      const photo = await camera.current.takePhoto({
+        flash: 'off',
+        quality: 90,
       })
-      contourPath.close()
-    })
 
-    frame.save()
-    frame.clipPath(contourPath, ClipOp.Intersect, true)
-    frame.render(blurPaint)
-    frame.restore()
+      // Process the photo to extract just the face region
+      setCapturedFace({
+        path: photo.path,
+        bounds: faceData.bounds,
+      })
 
-    // draw mouth shape
-    const mouthPath = Skia.Path.Make()
-    const mouthPaint = Skia.Paint()
-    mouthPaint.setColor(Skia.Color('red'))
-    const necessaryLandmarks: (keyof Landmarks)[] = ['MOUTH_BOTTOM', 'MOUTH_LEFT', 'MOUTH_RIGHT']
+      // Show modal to enter person's name
+      setModalVisible(true)
+    } catch (error) {
+      console.error('Error capturing face:', error)
+      Alert.alert('Capture Error', 'Failed to capture face. Please try again.')
+    }
+  }
 
-    necessaryLandmarks.forEach((key, index) => {
-      const point = landmarks?.[key]
-      if (!point) return
+  // Prepare captured face for model
+  const prepareCapturedFace = async (facePath, faceBounds) => {
+    // This is a placeholder for the actual implementation
+    // In reality, this would load the image from disk, crop the face,
+    // resize, normalize, etc.
 
-      if (index === 0) {
-        // it's a starting point
-        mouthPath.moveTo(point.x, point.y)
+    return {
+      // Preprocessed image data
+      width: 112, // Example expected model input size
+      height: 112,
+      data: new Float32Array(112 * 112 * 3), // Placeholder for actual pixel data
+    }
+  }
+
+  // Add new person with captured face
+  const addNewPerson = async () => {
+    if (!capturedFace || !newPersonName.trim() || !model) {
+      Alert.alert('Input Error', 'Please provide a name and ensure a face is captured.')
+      return
+    }
+
+    try {
+      // Prepare the captured face for the model
+      const preparedFace = await prepareCapturedFace(capturedFace.path, capturedFace.bounds)
+
+      // Extract face embedding
+      const embedding = await extractFaceEmbedding(preparedFace)
+
+      if (embedding) {
+        // Create new person entry
+        const newPerson = {
+          id: Date.now().toString(),
+          name: newPersonName.trim(),
+          embedding: embedding,
+          imagePath: capturedFace.path,
+        }
+
+        // Add to saved faces
+        const updatedFaces = [...savedFaces, newPerson]
+        setSavedFaces(updatedFaces)
+
+        // Save to storage
+        await saveFacesToStorage(updatedFaces)
+
+        // Reset state
+        setNewPersonName('')
+        setCapturedFace(null)
+        setModalVisible(false)
+
+        Alert.alert('Success', `Added ${newPersonName} successfully!`)
       } else {
-        // it's a continuation
-        mouthPath.lineTo(point.x, point.y)
+        Alert.alert('Processing Error', 'Could not process face features. Please try again.')
       }
-    })
-    mouthPath.close()
-    frame.drawPath(mouthPath, mouthPaint)
+    } catch (error) {
+      console.error('Error adding new person:', error)
+      Alert.alert('Error', 'Failed to add new person. Please try again.')
+    }
+  }
 
-    // draw a rectangle around the face
-    const rectPaint = Skia.Paint()
-    rectPaint.setColor(Skia.Color('blue'))
-    rectPaint.setStyle(1)
-    rectPaint.setStrokeWidth(5)
-    frame.drawRect(bounds, rectPaint)
+  // Toggle face recognition mode
+  const toggleRecognition = () => {
+    setIsRecording(!isRecording)
+    if (!isRecording) {
+      setRecognizedPerson('Scanning...')
+    } else {
+      setRecognizedPerson('Recognition stopped')
+    }
+  }
+
+  // Render face overlay box
+  const renderFaceBox = () => {
+    if (!faceData) return null
+
+    const { bounds } = faceData
+    const boxStyle = {
+      position: 'absolute',
+      borderWidth: 2,
+      borderColor: isRecording ? '#00FF00' : '#FFFFFF',
+      left: bounds.x,
+      top: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+    }
+
+    return <View style={boxStyle} />
+  }
+
+  // Clear all saved faces
+  const clearAllFaces = async () => {
+    Alert.alert('Clear All Faces', 'Are you sure you want to delete all saved faces?', [
+      {
+        text: 'Cancel',
+        style: 'cancel',
+      },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await AsyncStorage.removeItem('savedFaces')
+            setSavedFaces([])
+            Alert.alert('Success', 'All faces have been deleted.')
+          } catch (error) {
+            console.error('Error clearing faces:', error)
+            Alert.alert('Error', 'Failed to clear saved faces.')
+          }
+        },
+      },
+    ])
+  }
+
+  if (!hasPermission) {
+    return (
+      <View style={styles.centeredContainer}>
+        <Text style={styles.text}>Camera permission is required</Text>
+        <TouchableOpacity style={styles.button} onPress={requestPermission}>
+          <Text style={styles.buttonText}>Grant Permission</Text>
+        </TouchableOpacity>
+      </View>
+    )
   }
 
   return (
-    <>
-      <View
-        style={[
-          StyleSheet.absoluteFill,
-          {
-            alignItems: 'center',
-            justifyContent: 'center',
-          },
-        ]}>
-        {hasPermission && cameraDevice ? (
-          <>
-            {cameraMounted && (
-              <>
-                <Camera
-                  ref={camera as React.RefObject<any>}
-                  style={StyleSheet.absoluteFill}
-                  isActive={isCameraActive}
-                  device={cameraDevice}
-                  onError={handleCameraMountError}
-                  faceDetectionCallback={handleFacesDetected}
-                  onUIRotationChanged={handleUiRotation}
-                  skiaActions={handleSkiaActions}
-                  faceDetectionOptions={{
-                    ...faceDetectionOptions,
-                    autoMode,
-                    cameraFacing,
-                  }}
-                />
+    <View style={styles.container}>
+      <Camera
+        ref={camera}
+        style={styles.camera}
+        isActive={true}
+        device={device}
+        faceDetectionCallback={handleFacesDetection}
+        faceDetectionOptions={faceDetectionOptions}
+        photo={true}
+      />
 
-                <Animated.View style={boundingBoxStyle} />
+      {/* Face overlay */}
+      <View style={styles.overlay}>
+        {renderFaceBox()}
 
-                {/* {LeftEye} */}
-                {renderEyePoints()}
+        {/* Recognition status */}
+        <View style={styles.recognitionStatus}>
+          <Text style={styles.recognitionText}>{isRecording ? `Recognized: ${recognizedPerson}` : 'Recognition Inactive'}</Text>
+        </View>
 
-                {/* 포인트를 연결하는 선 (옵션) */}
-                {false && (
-                  <Svg style={StyleSheet.absoluteFill}>
-                    <AnimatedPath
-                      animatedProps={useAnimatedProps(() => {
-                        let d = ''
-                        for (let i = 0; i < 16; i++) {
-                          if (i === 0) {
-                            d += `M ${eyePointsX[i].value} ${eyePointsY[i].value}`
-                          } else {
-                            d += ` L ${eyePointsX[i].value} ${eyePointsY[i].value}`
-                          }
-                        }
-                        d += ' Z' // 경로 닫기
-                        return { d }
-                      })}
-                      stroke="rgba(0, 255, 255, 0.5)"
-                      strokeWidth="1"
-                      fill="transparent"
-                    />
-                  </Svg>
-                )}
+        {/* Control buttons */}
+        <View style={styles.controls}>
+          <TouchableOpacity style={[styles.button, isRecording ? styles.activeButton : null]} onPress={toggleRecognition}>
+            <Text style={styles.buttonText}>{isRecording ? 'Stop Recognition' : 'Start Recognition'}</Text>
+          </TouchableOpacity>
 
-                {/* {RightEye} */}
-                {renderEyePoints2()}
+          <TouchableOpacity
+            style={[styles.button, isRecording ? styles.disabledButton : null]}
+            onPress={captureFace}
+            disabled={isRecording || !faceData}>
+            <Text style={styles.buttonText}>Add Face</Text>
+          </TouchableOpacity>
+        </View>
 
-                {/* 포인트를 연결하는 선 (옵션) */}
-                {false && (
-                  <Svg style={StyleSheet.absoluteFill}>
-                    <AnimatedPath
-                      animatedProps={useAnimatedProps(() => {
-                        let d = ''
-                        for (let i = 0; i < 16; i++) {
-                          if (i === 0) {
-                            d += `M ${eyePointsX2[i].value} ${eyePointsY2[i].value}`
-                          } else {
-                            d += ` L ${eyePointsX2[i].value} ${eyePointsY2[i].value}`
-                          }
-                        }
-                        d += ' Z' // 경로 닫기
-                        return { d }
-                      })}
-                      stroke="rgba(0, 255, 255, 0.5)"
-                      strokeWidth="1"
-                      fill="transparent"
-                    />
-                  </Svg>
-                )}
+        {/* Saved faces count and clear button */}
+        <View style={styles.savedFacesContainer}>
+          <View style={styles.savedFacesInfo}>
+            <Text style={styles.text}>Saved Faces: {savedFaces.length}</Text>
+          </View>
 
-                {/* Camera status */}
+          {savedFaces.length > 0 && (
+            <TouchableOpacity style={styles.clearButton} onPress={clearAllFaces}>
+              <Text style={styles.buttonText}>Clear All</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      </View>
 
-                {cameraPaused && (
-                  <Text
-                    style={{
-                      width: '100%',
-                      backgroundColor: 'rgb(0,0,255)',
-                      textAlign: 'center',
-                      color: 'white',
-                    }}>
-                    Camera is PAUSED
-                  </Text>
-                )}
-              </>
-            )}
+      {/* Add Person Modal */}
+      <Modal animationType="slide" transparent={true} visible={modalVisible} onRequestClose={() => setModalVisible(false)}>
+        <View style={styles.modalContainer}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Add New Person</Text>
 
-            {!cameraMounted && (
-              <Text
-                style={{
-                  width: '100%',
-                  backgroundColor: 'rgb(255,255,0)',
-                  textAlign: 'center',
+            <TextInput style={styles.input} placeholder="Enter Person's Name" value={newPersonName} onChangeText={setNewPersonName} />
+
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={[styles.button, styles.cancelButton]}
+                onPress={() => {
+                  setModalVisible(false)
+                  setCapturedFace(null)
+                  setNewPersonName('')
                 }}>
-                Camera is NOT mounted
-              </Text>
-            )}
-          </>
-        ) : (
-          <Text
-            style={{
-              width: '100%',
-              backgroundColor: 'rgb(255,0,0)',
-              textAlign: 'center',
-              color: 'white',
-            }}>
-            No camera device or permission
-          </Text>
-        )}
-      </View>
+                <Text style={styles.buttonText}>Cancel</Text>
+              </TouchableOpacity>
 
-      <View
-        style={{
-          position: 'absolute',
-          bottom: 20,
-          left: 0,
-          right: 0,
-          display: 'flex',
-          flexDirection: 'column',
-        }}>
-        <View
-          style={{
-            width: '100%',
-            display: 'flex',
-            flexDirection: 'row',
-            justifyContent: 'space-around',
-          }}>
-          <Button onPress={() => setCameraFacing((current) => (current === 'front' ? 'back' : 'front'))} title={'Toggle Cam'} />
-
-          <Button onPress={() => setAutoMode((current) => !current)} title={`${autoMode ? 'Disable' : 'Enable'} AutoMode`} />
+              <TouchableOpacity style={[styles.button, styles.saveButton]} onPress={addNewPerson}>
+                <Text style={styles.buttonText}>Save</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
         </View>
-        <View
-          style={{
-            width: '100%',
-            display: 'flex',
-            flexDirection: 'row',
-            justifyContent: 'space-around',
-          }}>
-          <Button onPress={() => setCameraPaused((current) => !current)} title={`${cameraPaused ? 'Resume' : 'Pause'} Cam`} />
-
-          <Button onPress={() => setCameraMounted((current) => !current)} title={`${cameraMounted ? 'Unmount' : 'Mount'} Cam`} />
-        </View>
-      </View>
-    </>
+      </Modal>
+    </View>
   )
 }
 
-/**
- * App component
- *
- * @return {JSX.Element} Component
- */
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: 'red',
+  },
+  centeredContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#1a1a1a',
+  },
+  camera: {
+    width: '100%',
+    height: '100%',
+  },
+  overlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  recognitionStatus: {
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    padding: 10,
+    margin: 20,
+    borderRadius: 10,
+    position: 'absolute',
+    top: 40,
+    left: 0,
+    right: 0,
+    alignItems: 'center',
+  },
+  recognitionText: {
+    color: 'white',
+    fontSize: 18,
+    fontWeight: 'bold',
+  },
+  controls: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    position: 'absolute',
+    bottom: 30,
+    left: 0,
+    right: 0,
+  },
+  button: {
+    backgroundColor: '#4a90e2',
+    padding: 15,
+    borderRadius: 8,
+    minWidth: 150,
+    alignItems: 'center',
+  },
+  activeButton: {
+    backgroundColor: '#e74c3c',
+  },
+  disabledButton: {
+    backgroundColor: '#95a5a6',
+    opacity: 0.7,
+  },
+  buttonText: {
+    color: 'white',
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  savedFacesContainer: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    padding: 8,
+    borderRadius: 8,
+    position: 'absolute',
+    bottom: 100,
+    left: 20,
+    right: 20,
+  },
+  savedFacesInfo: {
+    flex: 1,
+  },
+  clearButton: {
+    backgroundColor: '#e74c3c',
+    padding: 8,
+    borderRadius: 5,
+    marginLeft: 10,
+  },
+  text: {
+    color: 'white',
+    fontSize: 16,
+  },
+  modalContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+  },
+  modalContent: {
+    backgroundColor: 'white',
+    borderRadius: 10,
+    padding: 20,
+    width: '80%',
+    alignItems: 'center',
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    marginBottom: 20,
+  },
+  input: {
+    width: '100%',
+    borderWidth: 1,
+    borderColor: '#ccc',
+    borderRadius: 5,
+    padding: 10,
+    marginBottom: 20,
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    width: '100%',
+  },
+  cancelButton: {
+    backgroundColor: '#95a5a6',
+  },
+  saveButton: {
+    backgroundColor: '#2ecc71',
+  },
+})
+
 export function App(): JSX.Element {
   return (
-    <SafeAreaProvider>
-      <NavigationContainer>
-        <FaceDetection />
-      </NavigationContainer>
-    </SafeAreaProvider>
+    <View style={{ flex: 1 }}>
+      <FaceRecognition />
+    </View>
   )
 }
