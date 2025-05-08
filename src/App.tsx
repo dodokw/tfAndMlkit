@@ -329,6 +329,7 @@ const FaceRecognition = () => {
 
       const res = await PhotoManipulator.crop(filePath, cropRegion, targetSize).then((path) => {
         console.log(`Result image path: ${path}`)
+        // console.log('res:', res)
         return {
           width: INPUT_SIZE,
           height: INPUT_SIZE,
@@ -336,7 +337,7 @@ const FaceRecognition = () => {
           path: path,
         }
       })
-      // console.log('res:', res?.data?.height)
+      console.log('res:', res)
       console.log('should work res ')
       return res
     } catch (e) {
