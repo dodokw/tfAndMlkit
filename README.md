@@ -1,7 +1,13 @@
 **얼굴 인식 앱**
+
+--------------------------------------------------
+
 이 프로젝트는 React Native 기반의 실시간 얼굴 인식 애플리케이션입니다. 기기 카메라를 사용하여 얼굴을 감지하고, 감지된 얼굴을 등록 및 인식할 수 있습니다. **FaceNet 모델 (facenet.tflite)**을 사용하여 얼굴 임베딩을 추출하고, 저장된 얼굴과 코사인 유사도로 비교합니다.
 
 **주요 기능**
+
+------------------------------------------------
+
 실시간 얼굴 감지: react-native-vision-camera-face-detector를 활용하여 효율적인 얼굴 감지를 수행합니다.
 FaceNet 임베딩 추출: react-native-fast-tflite를 사용하여 고차원 얼굴 임베딩을 추출합니다.
 얼굴 등록 및 인식: 새로운 얼굴을 추가하고 이전에 등록된 얼굴을 식별하는 핵심 기능입니다.
@@ -26,17 +32,23 @@ const filePath = path.startsWith('file://') ? path : 'file://' + path
 
 // 자르기 및 크기 조정
 const croppedPath = await PhotoManipulator.crop(filePath, cropRegion, targetSize)
+```
 2. 잘라낸 이미지를 Base64 또는 바이너리로 읽기
 잘라낸 이미지 파일은 Base64 문자열로 읽어옵니다. react-native-file-access의 FileSystem.readFile이 이 단계에 사용됩니다.
-```
+
 JavaScript
+
 ```
 const base64Data = await FileSystem.readFile(croppedPath, 'base64')
+```
+
+
 3. 이미지 데이터 변환 (정규화 등)
 Base64 데이터는 바이너리로 변환된 후, JPEG 디코더(jpeg-js 등)를 사용하여 픽셀 데이터를 추출합니다. RGB 채널만 추출되며, 픽셀 값은 -1에서 1 범위로 정규화됩니다.
 
 JavaScript
 
+```
 import jpeg from 'jpeg-js'
 
 const binaryData = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0))
@@ -48,9 +60,11 @@ for (let i = 0, j = 0; i < decoded.data.length; i += 4, j += 3) {
   float32Data[j+1] = decoded.data[i+1] / 127.5 - 1   // G
   float32Data[j+2] = decoded.data[i+2] / 127.5 - 1   // B
 }
+```
+
 4. 변환된 데이터를 Float32Array로 반환
 최종적으로 width, height, 픽셀 데이터의 Float32Array, 그리고 잘라낸 이미지의 path를 포함하는 객체가 반환됩니다.
-```
+
 JavaScript
 ```
 return {
@@ -60,10 +74,14 @@ return {
   path: croppedPath,
 }
 ```
+
+
 전체 전처리 함수 예시
 완전한 prepareCapturedFace 함수의 예시는 다음과 같습니다.
 
 JavaScript
+
+
 ```
 const prepareCapturedFace = async (capturedFaceData) => {
   if (!capturedFaceData || !capturedFaceData.path || !capturedFaceData.bounds) {
